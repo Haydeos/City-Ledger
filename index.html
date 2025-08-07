@@ -1,0 +1,330 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>City Ledger — Runnable</title>
+  <meta name="description" content="City Ledger: a lightweight city resource tracker for tabletop worlds." />
+  <style>
+    :root{--bg:#0b0d12;--card:#11151c;--muted:#1a1f29;--txt:#e6e9ef;--accent:#7aa2ff;--bad:#ff6b6b;--good:#7bd88f}
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.4 system-ui,Segoe UI,Roboto,Inter,Arial}
+    header{position:sticky;top:0;background:rgba(11,13,18,.8);backdrop-filter:saturate(1.2) blur(8px);border-bottom:1px solid #202735}
+    .wrap{max-width:1200px;margin:0 auto;padding:12px 16px}
+    h1{font-size:18px;margin:0;font-weight:700}
+    .row{display:flex;gap:8px;align-items:center}
+    .btn{background:#212735;border:1px solid #2a3341;color:var(--txt);padding:8px 10px;border-radius:8px;cursor:pointer}
+    .btn:hover{border-color:#3a4658}
+    .btn.alt{background:#171b23;border-color:#334058}
+    .btn.danger{background:#2a1820;border-color:#6b2d3f}
+    .grid{display:grid;gap:16px}
+    .layout{grid-template-columns:280px 1fr 320px}
+    @media (max-width:1000px){.layout{grid-template-columns:1fr}}
+    .card{background:var(--card);border:1px solid #202735;border-radius:12px;box-shadow:0 1px 0 #000 inset}
+    .card .head{padding:10px 14px;border-bottom:1px solid #1b2230;font-weight:600}
+    .card .body{padding:12px 14px}
+    .city-card{padding:12px;border:2px solid transparent;cursor:pointer}
+    .city-card.active{border-color:var(--accent)}
+    .pill{display:flex;gap:8px;align-items:center;background:var(--muted);border-radius:999px;padding:6px 10px;position:relative}
+    .pill small{opacity:.65;display:block;line-height:1}
+    .pill b{font-weight:700}
+    .pill-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:8px}
+    @media (max-width:900px){.pill-grid{grid-template-columns:repeat(3,1fr)}}
+    .stat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+    @media (max-width:900px){.stat-grid{grid-template-columns:repeat(2,1fr)}}
+    .build-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}
+    @media (max-width:800px){.build-grid{grid-template-columns:1fr}}
+    .build{border:1px solid #273040;border-radius:10px;padding:10px;background:#0f131a}
+    .build h4{margin:0 0 6px 0}
+    .muted{opacity:.7}
+    .tooltip{position:absolute;left:0;right:auto;top:-6px;transform:translateY(-100%);background:#0e1117;border:1px solid #283142;color:var(--txt);padding:8px 10px;border-radius:8px;font-size:12px;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .12s ease}
+    .pill:hover .tooltip{opacity:1}
+    .log{max-height:520px;overflow:auto}
+    .log .row{justify-content:space-between;border:1px solid #243043;border-radius:8px;padding:8px 10px}
+    .good{color:var(--good)}
+    .bad{color:var(--bad)}
+    .hl{color:var(--accent)}
+  </style>
+</head>
+<body>
+<header>
+  <div class="wrap row">
+    <h1>City Ledger</h1>
+    <div class="row" style="margin-left:auto">
+      <button class="btn alt" id="autoBtn">Auto: Off</button>
+      <button class="btn alt" id="adv1">Advance Week</button>
+      <button class="btn alt" id="adv5">+5</button>
+      <button class="btn" id="undo">Undo</button>
+      <button class="btn danger" id="reset">Reset</button>
+    </div>
+  </div>
+</header>
+
+<main class="wrap grid layout" style="padding:16px">
+  <!-- Sidebar: cities -->
+  <section id="sidebar" class="grid" style="align-content:start"></section>
+
+  <!-- Main: city detail -->
+  <section class="grid" id="main" style="align-content:start;gap:16px"></section>
+
+  <!-- Right: Advisor + Logs -->
+  <section class="grid" id="right" style="align-content:start;gap:16px"></section>
+</main>
+
+<script>
+// ======= Simulation core =======
+const FOOD_PER_CAPITA = 1.0;
+const LUX_PER_CAPITA = 0.02;
+const START_MORALE = 55;
+const START_UNREST = 10;
+
+const BUILDINGS = {
+  Farm:       { cost:{Wood:20,Stone:10}, output:{Food:60}, desc:"Produces staple food.", req:[] },
+  Fishery:    { cost:{Wood:15},         output:{Food:50}, desc:"Coastal food production.", req:["Coast"] },
+  Orchard:    { cost:{Wood:25},         output:{Food:40,Lux:10}, desc:"Fruit & cider (luxury).", req:["Plains","Hills"] },
+  LumberCamp: { cost:{Wood:20},         output:{Wood:50}, desc:"Harvests lumber.", req:[] },
+  StoneQuarry:{ cost:{Wood:15},         output:{Stone:40}, desc:"Quarried stone.", req:[] },
+  IronMine:   { cost:{Wood:20,Stone:20},output:{Iron:25}, desc:"Iron ore production.", req:["Hills","Mountain"] },
+  Brewery:    { cost:{Wood:15,Stone:10},output:{Lux:20}, desc:"Brews ale (luxury). Upkeep 2g.", req:[], upkeep:{Gold:2} },
+  Market:     { cost:{Wood:20,Stone:20},output:{Gold:10}, desc:"Gold scales with population.", req:[] },
+  Tavern:     { cost:{Wood:10,Stone:5}, output:{},          desc:"Converts lux to morale. Upkeep 1g.", req:[], upkeep:{Gold:1} },
+};
+const LUX_VARIETY_SOURCES = new Set(["Brewery","Orchard","Weavers","SpiceGuild"]);
+
+function terrainMod(terrain){
+  const m={Food:1,Wood:1,Stone:1,Iron:1,Lux:1,Gold:1};
+  if(terrain.includes("Plains")) m.Food*=1.1;
+  if(terrain.includes("Forest")){m.Wood*=1.25; m.Food*=0.9}
+  if(terrain.includes("Mountain")){m.Stone*=1.25; m.Iron*=1.15; m.Food*=0.9}
+  if(terrain.includes("Hills")) m.Stone*=1.05;
+  if(terrain.includes("Coast")) m.Food*=1.15;
+  if(terrain.includes("Swamp")){m.Food*=0.95; m.Lux*=1.1}
+  return m;
+}
+function speciesMod(species,terrain){
+  const m={Food:1,Wood:1,Stone:1,Iron:1,Lux:1,Gold:1};
+  if(species==="Human") m.Gold*=1.1;
+  if(species==="Elf"){ if(terrain.includes("Forest")) m.Wood*=1.15; m.Food*=1.05; }
+  if(species==="Dwarf"){ m.Stone*=1.2; m.Iron*=1.2; if(terrain.some(t=>t==="Hills"||t==="Mountain")){m.Stone*=1.1;m.Iron*=1.1}}
+  if(species==="Orc") m.Food*=0.95;
+  if(species==="Halfling"){ m.Food*=1.15; m.Lux*=1.1 }
+  return m;
+}
+function varietyCount(buildings){
+  return Math.min(4, Object.entries(buildings).reduce((a,[k,v])=>a+(v>0 && LUX_VARIETY_SOURCES.has(k)?1:0),0));
+}
+function calcProduction(city){
+  const base={Food:0,Wood:0,Stone:0,Iron:0,Lux:0,Gold:0};
+  for(const [b,count] of Object.entries(city.buildings)){
+    if(!count) continue; const spec=BUILDINGS[b]; if(!spec) continue;
+    for(const [k,v] of Object.entries(spec.output)) base[k]+=v*count;
+  }
+  if(city.buildings.Market) base.Gold += Math.floor(city.population/100)*city.buildings.Market;
+  const t=terrainMod(city.terrain), s=speciesMod(city.species,city.terrain);
+  for(const k in base) base[k]*=t[k]*s[k];
+  return base;
+}
+function computeNet(city){
+  const prod=calcProduction(city);
+  const foodNeed=city.population*FOOD_PER_CAPITA;
+  const luxNeed=city.population*LUX_PER_CAPITA;
+  const upkeep=(city.buildings.Tavern||0)*1 + (city.buildings.Brewery||0)*(BUILDINGS.Brewery.upkeep?.Gold||0);
+  return { Food:(prod.Food||0)-foodNeed, Lux:(prod.Lux||0)-luxNeed, Wood:prod.Wood||0, Stone:prod.Stone||0, Iron:prod.Iron||0, Gold:(prod.Gold||0)-upkeep, detail:{prod,foodNeed,luxNeed,upkeep} };
+}
+function tickOneWeek(state){
+  const next=structuredClone(state);
+  for(const city of Object.values(next.cities)){
+    const prod=calcProduction(city);
+    for(const k of Object.keys(city.stores)) city.stores[k]+=prod[k]||0;
+    const foodNeed=city.population*FOOD_PER_CAPITA;
+    const luxNeed=city.population*LUX_PER_CAPITA;
+    const eat=Math.min(city.stores.Food,foodNeed); city.stores.Food-=eat; const foodOk = eat>=foodNeed-1e-6;
+    const lux=Math.min(city.stores.Lux,luxNeed); city.stores.Lux-=lux; const luxOk = lux>=luxNeed-1e-6;
+    const variety=varietyCount(city.buildings);
+    let dM=0; if(foodOk){dM+=2;city.hungerWeeks=0}else{city.hungerWeeks=(city.hungerWeeks||0)+1; dM-=5+city.hungerWeeks}
+    if(luxOk) dM+=variety; else if(variety===0) dM-=1; dM-=city.unrest/20; city.morale=Math.max(0,Math.min(100,Math.round(city.morale+dM)));
+    if(city.morale>=60 && foodOk){ const g=Math.floor(city.population*(0.01+Math.random()*0.02)); city.population+=g; }
+    else if(city.morale<=40 || !foodOk){ const sh=Math.max(1,Math.floor(city.population*(0.005+Math.random()*0.015))); city.population=Math.max(0,city.population-sh); city.unrest=Math.min(100,city.unrest+2); }
+    const upkeep=(city.buildings.Tavern||0)*1 + (city.buildings.Brewery||0)*(BUILDINGS.Brewery.upkeep?.Gold||0); city.stores.Gold=Math.max(0,city.stores.Gold-upkeep);
+    let event=""; const r=Math.random();
+    if(r<0.08 && (city.buildings.Farm||0)>0){ const bonus=(city.buildings.Farm||0)*30; city.stores.Food+=bonus; event=`Bumper harvest (+${bonus} Food)`; }
+    else if(r>0.92 && (city.buildings.IronMine||0)>0){ const pen=(city.buildings.IronMine||0)*10; city.stores.Iron=Math.max(0,city.stores.Iron-pen); event=`Mine cave-in (−${pen} Iron)`; }
+    const row={ts:Date.now(), dFood:Math.round((prod.Food||0)-foodNeed), dLux:Math.round((prod.Lux||0)-luxNeed), dWood:Math.round(prod.Wood||0), dStone:Math.round(prod.Stone||0), dIron:Math.round(prod.Iron||0), goldPlus:Math.round((prod.Gold||0)-upkeep), moraleDelta:Math.round(dM), event};
+    city.log.unshift(row); if(city.log.length>60) city.log.pop();
+  }
+  next.week++;
+  return next;
+}
+function buildAdvice(city){
+  const net=computeNet(city); const items=[]; const last=city.log[0]?.moraleDelta??0; const variety=varietyCount(city.buildings);
+  if(last<0){
+    if(net.Food<0 || (city.hungerWeeks||0)>0) items.push(`Food deficit ${signFmt(net.Food)}; hunger ${city.hungerWeeks||0} wk`);
+    if(net.Lux<0) items.push(`Insufficient lux (need ~${fmt(net.detail.luxNeed)}, prod ${fmt(net.detail.prod.Lux||0)})`);
+    if(variety===0) items.push("No luxury variety (build Brewery/Orchard)");
+    if(city.unrest>20) items.push(`Unrest ${city.unrest} reduces morale by ${Math.round(city.unrest/20)}`);
+    if(!items.length) items.push("Consider adding Tavern/Temple or reducing Unrest.");
+  }
+  if(net.Food<0){ const weeks=Math.max(1,Math.floor(city.stores.Food/Math.abs(net.Food))); items.push(`Food reserves last ~${weeks} week(s).`) }
+  if(net.Gold<0){ const weeks=Math.max(1,Math.floor((city.stores.Gold||0)/Math.abs(net.Gold))); items.push(`Gold negative ${signFmt(net.Gold)}; reserves ~${weeks} week(s).`) }
+  const headline = last<0?`Morale is dropping (${last})`: last>0?`Morale improved (+${last})`:`Morale stable`;
+  return {headline, items, net};
+}
+
+// ======= State & init =======
+function initialWorld(){
+  return { week:1, selected:"Hadrix", undo:[], cities:{
+    Hadrix:{id:"Hadrix",name:"Hadrix",species:"Dwarf",terrain:["Mountain"],population:1200,morale:START_MORALE,unrest:START_UNREST,hungerWeeks:0,stores:{Food:300,Wood:150,Stone:200,Iron:80,Lux:40,Gold:120},buildings:{Farm:10,StoneQuarry:5,IronMine:3,Brewery:2,Market:1,Tavern:1},log:[]},
+    Greenhollow:{id:"Greenhollow",name:"Greenhollow",species:"Elf",terrain:["Forest","Hills"],population:900,morale:START_MORALE,unrest:START_UNREST,hungerWeeks:0,stores:{Food:260,Wood:200,Stone:90,Iron:20,Lux:25,Gold:90},buildings:{Farm:8,LumberCamp:6,Orchard:2,Brewery:1,Market:1},log:[]},
+    Coastrun:{id:"Coastrun",name:"Coastrun",species:"Human",terrain:["Plains","Coast"],population:1500,morale:START_MORALE,unrest:START_UNREST,hungerWeeks:0,stores:{Food:380,Wood:120,Stone:110,Iron:30,Lux:30,Gold:150},buildings:{Farm:12,Fishery:6,Market:1,Brewery:1,LumberCamp:2},log:[]}
+  }}
+}
+let WORLD = initialWorld();
+let AUTO = false, AUTO_T = null;
+
+// ======= UI helpers =======
+const $ = (q,el=document)=>el.querySelector(q);
+const $$ = (q,el=document)=>el.querySelectorAll(q);
+const fmt = (n)=> new Intl.NumberFormat().format(Math.floor(n));
+const signFmt = (n)=>{ n=Math.round(n); return `${n>=0?'+':''}${fmt(n)}` };
+function pill(label,value,tip){
+  return `<div class="pill"><div><small>${label}</small><div><b>${fmt(value)}</b></div></div><div class="tooltip">${tip}</div></div>`
+}
+
+// ======= Render =======
+function render(){
+  // sidebar
+  const s = Object.values(WORLD.cities).map(c=>{
+    return `<div class="card city-card ${WORLD.selected===c.id?'active':''}" onclick="selectCity('${c.id}')">
+      <div class="row" style="justify-content:space-between">
+        <div>
+          <div style="font-weight:700">${c.name}</div>
+          <div class="muted" style="font-size:12px">${c.species} • ${c.terrain.join('/')}</div>
+        </div>
+        <div style="text-align:right">
+          <div style="font-size:13px">Pop ${fmt(c.population)}</div>
+          <div class="muted" style="font-size:12px">Morale ${c.morale}</div>
+        </div>
+      </div>
+    </div>`
+  }).join('');
+  document.getElementById('sidebar').innerHTML = s;
+
+  const city = WORLD.cities[WORLD.selected];
+  const net = computeNet(city);
+  const tips = {
+    Food:`This week: ${signFmt(net.Food)} (Prod ${fmt(net.detail.prod.Food||0)} − Need ${fmt(net.detail.foodNeed)})<br/>Stock: ${fmt(city.stores.Food)}`,
+    Lux:`This week: ${signFmt(net.Lux)} (Prod ${fmt(net.detail.prod.Lux||0)} − Need ${fmt(net.detail.luxNeed)})<br/>Variety: ${varietyCount(city.buildings)}<br/>Stock: ${fmt(city.stores.Lux)}`,
+    Wood:`This week: +${fmt(net.Wood)}<br/>Stock: ${fmt(city.stores.Wood)}`,
+    Stone:`This week: +${fmt(net.Stone)}<br/>Stock: ${fmt(city.stores.Stone)}`,
+    Iron:`This week: +${fmt(net.Iron)}<br/>Stock: ${fmt(city.stores.Iron)}`,
+    Gold:`This week: ${signFmt(net.Gold)} (Income ${fmt(net.detail.prod.Gold||0)} − Upkeep ${fmt(net.detail.upkeep)})<br/>Stock: ${fmt(city.stores.Gold)}`
+  };
+
+  document.getElementById('main').innerHTML = `
+    <div class="row" style="justify-content:space-between">
+      <div class="row"><div style="font-weight:700;font-size:18px">${city.name}</div></div>
+      <div class="muted">Week ${WORLD.week}</div>
+    </div>
+
+    <div class="stat-grid">
+      <div class="pill"><div><small>Population</small><div><b>${fmt(city.population)}</b></div></div></div>
+      <div class="pill"><div><small>Morale</small><div><b>${fmt(city.morale)}</b></div></div></div>
+      <div class="pill"><div><small>Unrest</small><div><b>${fmt(city.unrest)}</b></div></div></div>
+      <div class="pill"><div><small>Variety (lux)</small><div><b>${varietyCount(city.buildings)}</b></div></div></div>
+    </div>
+
+    <div class="pill-grid">
+      ${pill('Food',  city.stores.Food,  tips.Food)}
+      ${pill('Lux',   city.stores.Lux,   tips.Lux)}
+      ${pill('Wood',  city.stores.Wood,  tips.Wood)}
+      ${pill('Stone', city.stores.Stone, tips.Stone)}
+      ${pill('Iron',  city.stores.Iron,  tips.Iron)}
+      ${pill('Gold',  city.stores.Gold,  tips.Gold)}
+    </div>
+
+    <div class="card">
+      <div class="head">Build</div>
+      <div class="body build-grid" id="buildGrid"></div>
+    </div>
+  `;
+
+  // build catalog
+  const buildHtml = Object.keys(BUILDINGS).map(k=>{
+    const spec = BUILDINGS[k];
+    const costText = Object.entries(spec.cost).map(([r,v])=>`${r} ${v}`).join(' · ');
+    const canHere = !spec.req?.length || spec.req.some(t=>city.terrain.includes(t));
+    const afford = Object.entries(spec.cost).every(([r,v])=> (city.stores[r]||0) >= v);
+    return `<div class="build" style="${!canHere?'opacity:.5;':''}">
+      <h4>${k} <span class="muted">x${city.buildings[k]||0}</span></h4>
+      <div class="muted" style="font-size:12px">${spec.desc}</div>
+      <div class="muted" style="font-size:12px">${Object.keys(spec.output).length? Object.entries(spec.output).map(([r,v])=>`${r}+${v}/wk`).join(' · '):'No weekly output'}</div>
+      <div class="muted" style="font-size:12px">Cost: ${costText||'—'}</div>
+      ${spec.req?.length?`<div class="muted" style="font-size:12px">Requires: ${spec.req.join(' or ')}</div>`:''}
+      <div style="margin-top:8px"><button class="btn alt" ${(!canHere||!afford)?'disabled':''} onclick="doBuild('${city.id}','${k}')">Build</button></div>
+    </div>`
+  }).join('');
+  document.getElementById('buildGrid').innerHTML = buildHtml;
+
+  // right column: Advisor + Logs
+  const adv = buildAdvice(city);
+  document.getElementById('right').innerHTML = `
+    <div class="card"><div class="head">Advisor</div>
+      <div class="body">
+        <div style="font-weight:600;margin-bottom:6px">${adv.headline}</div>
+        ${adv.items.length? `<ul style="padding-left:18px;margin:0">${adv.items.map(x=>`<li>${x}</li>`).join('')}</ul>` : `<div class="muted" style="font-size:12px">All quiet. Keep it up!</div>`}
+      </div>
+    </div>
+    <div class="card"><div class="head">Weekly Log</div>
+      <div class="body log" id="log">
+        ${city.log.length? city.log.map((r,i)=>`<div class="row" style="margin-bottom:8px">
+          <div class="muted" style="font-size:12px">+${i+1}</div>
+          <div style="display:flex;gap:10px;flex-wrap:wrap;font-size:12px">
+            <span>ΔFood ${r.dFood}</span>
+            <span>ΔLux ${r.dLux}</span>
+            <span>Wood +${r.dWood}</span>
+            <span>Stone +${r.dStone}</span>
+            <span>Iron +${r.dIron}</span>
+            <span>Gold ${r.goldPlus>=0?'+':''}${r.goldPlus}</span>
+            <span>Morale ${r.moraleDelta>=0?'+':''}${r.moraleDelta}</span>
+          </div>
+          <div class="muted" style="font-size:12px">${r.event||''}</div>
+        </div>`).join('') : '<div class="muted">No entries yet. Advance a week!</div>'}
+      </div>
+    </div>
+  `;
+}
+
+// ======= Actions =======
+function pushUndo(){
+  WORLD.undo.push(JSON.stringify(WORLD));
+  if(WORLD.undo.length>25) WORLD.undo.shift();
+}
+function undo(){ if(!WORLD.undo.length) return; WORLD = JSON.parse(WORLD.undo.pop()); render(); }
+function selectCity(id){ WORLD.selected=id; render(); }
+function doBuild(cityId, b){
+  const c = WORLD.cities[cityId]; const spec=BUILDINGS[b];
+  if(spec.req?.length && !spec.req.some(t=>c.terrain.includes(t))){ alert(`${b} requires ${spec.req.join(' or ')}`); return; }
+  const afford = Object.entries(spec.cost).every(([r,v])=> (c.stores[r]||0)>=v);
+  if(!afford){ alert('Not enough materials.'); return; }
+  pushUndo();
+  for(const [r,v] of Object.entries(spec.cost)) c.stores[r]-=v;
+  c.buildings[b]=(c.buildings[b]||0)+1;
+  render();
+}
+function advance(n=1){ pushUndo(); for(let i=0;i<n;i++) WORLD = tickOneWeek(WORLD); render(); }
+function reset(){ WORLD = initialWorld(); AUTO=false; clearInterval(AUTO_T); document.getElementById('autoBtn').textContent='Auto: Off'; render(); }
+
+// ======= Wire controls =======
+document.getElementById('adv1').onclick=()=>advance(1);
+document.getElementById('adv5').onclick=()=>advance(5);
+document.getElementById('undo').onclick=()=>undo();
+document.getElementById('reset').onclick=()=>reset();
+document.getElementById('autoBtn').onclick=()=>{
+  AUTO=!AUTO;
+  if(AUTO){ document.getElementById('autoBtn').textContent='Auto: On'; AUTO_T=setInterval(()=>advance(1),1200);} else { document.getElementById('autoBtn').textContent='Auto: Off'; clearInterval(AUTO_T);} }
+
+// Boot
+render();
+</script>
+</body>
+</html>
