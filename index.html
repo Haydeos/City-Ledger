@@ -44,13 +44,18 @@
     .good{color:var(--good)}
     .bad{color:var(--bad)}
     .hl{color:var(--accent)}
+    .empty{border:1px dashed #2a3341;border-radius:12px;padding:16px;text-align:center}
   </style>
 </head>
 <body>
 <header>
   <div class="wrap row">
     <h1>City Ledger</h1>
-    <div class="row" style="margin-left:auto">
+    <div class="row" style="margin-left:auto;gap:8px">
+      <button class="btn alt" id="addTown">Add Town</button>
+      <button class="btn" id="export">Export</button>
+      <label class="btn" for="importFile" style="cursor:pointer">Import</label>
+      <input type="file" id="importFile" accept="application/json" style="display:none" />
       <button class="btn alt" id="autoBtn">Auto: Off</button>
       <button class="btn alt" id="adv1">Advance Week</button>
       <button class="btn alt" id="adv5">+5</button>
@@ -105,9 +110,9 @@ function speciesMod(species,terrain){
   const m={Food:1,Wood:1,Stone:1,Iron:1,Lux:1,Gold:1};
   if(species==="Human") m.Gold*=1.1;
   if(species==="Elf"){ if(terrain.includes("Forest")) m.Wood*=1.15; m.Food*=1.05; }
-  if(species==="Dwarf"){ m.Stone*=1.2; m.Iron*=1.2; if(terrain.some(t=>t==="Hills"||t==="Mountain")){m.Stone*=1.1;m.Iron*=1.1}}
+  if(species==="Dwarf"){ m.Stone*=1.2; m.Iron*=1.2; if(terrain.some(t=>t==="Hills"||t==="Mountain")){ m.Stone*=1.1; m.Iron*=1.1; } }
   if(species==="Orc") m.Food*=0.95;
-  if(species==="Halfling"){ m.Food*=1.15; m.Lux*=1.1 }
+  if(species==="Halfling"){ m.Food*=1.15; m.Lux*=1.1; }
   return m;
 }
 function varietyCount(buildings){
@@ -141,7 +146,7 @@ function tickOneWeek(state){
     const eat=Math.min(city.stores.Food,foodNeed); city.stores.Food-=eat; const foodOk = eat>=foodNeed-1e-6;
     const lux=Math.min(city.stores.Lux,luxNeed); city.stores.Lux-=lux; const luxOk = lux>=luxNeed-1e-6;
     const variety=varietyCount(city.buildings);
-    let dM=0; if(foodOk){dM+=2;city.hungerWeeks=0}else{city.hungerWeeks=(city.hungerWeeks||0)+1; dM-=5+city.hungerWeeks}
+    let dM=0; if(foodOk){ dM+=2; city.hungerWeeks=0; } else { city.hungerWeeks=(city.hungerWeeks||0)+1; dM-=5+city.hungerWeeks; }
     if(luxOk) dM+=variety; else if(variety===0) dM-=1; dM-=city.unrest/20; city.morale=Math.max(0,Math.min(100,Math.round(city.morale+dM)));
     if(city.morale>=60 && foodOk){ const g=Math.floor(city.population*(0.01+Math.random()*0.02)); city.population+=g; }
     else if(city.morale<=40 || !foodOk){ const sh=Math.max(1,Math.floor(city.population*(0.005+Math.random()*0.015))); city.population=Math.max(0,city.population-sh); city.unrest=Math.min(100,city.unrest+2); }
@@ -164,36 +169,83 @@ function buildAdvice(city){
     if(city.unrest>20) items.push(`Unrest ${city.unrest} reduces morale by ${Math.round(city.unrest/20)}`);
     if(!items.length) items.push("Consider adding Tavern/Temple or reducing Unrest.");
   }
-  if(net.Food<0){ const weeks=Math.max(1,Math.floor(city.stores.Food/Math.abs(net.Food))); items.push(`Food reserves last ~${weeks} week(s).`) }
-  if(net.Gold<0){ const weeks=Math.max(1,Math.floor((city.stores.Gold||0)/Math.abs(net.Gold))); items.push(`Gold negative ${signFmt(net.Gold)}; reserves ~${weeks} week(s).`) }
+  if(net.Food<0){ const weeks=Math.max(1,Math.floor(city.stores.Food/Math.abs(net.Food))); items.push(`Food reserves last ~${weeks} week(s).`); }
+  if(net.Gold<0){ const weeks=Math.max(1,Math.floor((city.stores.Gold||0)/Math.abs(net.Gold))); items.push(`Gold negative ${signFmt(net.Gold)}; reserves ~${weeks} week(s).`); }
   const headline = last<0?`Morale is dropping (${last})`: last>0?`Morale improved (+${last})`:`Morale stable`;
   return {headline, items, net};
 }
 
-// ======= State & init =======
-function initialWorld(){
-  return { week:1, selected:"Hadrix", undo:[], cities:{
-    Hadrix:{id:"Hadrix",name:"Hadrix",species:"Dwarf",terrain:["Mountain"],population:1200,morale:START_MORALE,unrest:START_UNREST,hungerWeeks:0,stores:{Food:300,Wood:150,Stone:200,Iron:80,Lux:40,Gold:120},buildings:{Farm:10,StoneQuarry:5,IronMine:3,Brewery:2,Market:1,Tavern:1},log:[]},
-    Greenhollow:{id:"Greenhollow",name:"Greenhollow",species:"Elf",terrain:["Forest","Hills"],population:900,morale:START_MORALE,unrest:START_UNREST,hungerWeeks:0,stores:{Food:260,Wood:200,Stone:90,Iron:20,Lux:25,Gold:90},buildings:{Farm:8,LumberCamp:6,Orchard:2,Brewery:1,Market:1},log:[]},
-    Coastrun:{id:"Coastrun",name:"Coastrun",species:"Human",terrain:["Plains","Coast"],population:1500,morale:START_MORALE,unrest:START_UNREST,hungerWeeks:0,stores:{Food:380,Wood:120,Stone:110,Iron:30,Lux:30,Gold:150},buildings:{Farm:12,Fishery:6,Market:1,Brewery:1,LumberCamp:2},log:[]}
-  }}
-}
+// ======= State, Storage & init =======
+const STORAGE_KEY = 'city-ledger-world-v2';
+function initialWorld(){ return { week:1, selected:null, undo:[], cities:{} }; }
 let WORLD = initialWorld();
 let AUTO = false, AUTO_T = null;
+
+function saveLocal(){ try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(WORLD)); }catch(e){} }
+function loadLocal(){
+  try{
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if(raw){ const data = JSON.parse(raw); if(data && typeof data === 'object') WORLD = data; }
+  }catch(e){} }
+function exportWorld(){
+  const blob = new Blob([JSON.stringify(WORLD,null,2)], {type:'application/json'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `city-ledger-${Date.now()}.json`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+function importWorldFile(file){
+  const reader = new FileReader();
+  reader.onload = () => { try { WORLD = JSON.parse(reader.result); ensureSelection(); render(); saveLocal(); } catch { alert('Invalid file'); } };
+  reader.readAsText(file);
+}
 
 // ======= UI helpers =======
 const $ = (q,el=document)=>el.querySelector(q);
 const $$ = (q,el=document)=>el.querySelectorAll(q);
 const fmt = (n)=> new Intl.NumberFormat().format(Math.floor(n));
 const signFmt = (n)=>{ n=Math.round(n); return `${n>=0?'+':''}${fmt(n)}` };
-function pill(label,value,tip){
-  return `<div class="pill"><div><small>${label}</small><div><b>${fmt(value)}</b></div></div><div class="tooltip">${tip}</div></div>`
+function pill(label,value,tip){ return `<div class="pill"><div><small>${label}</small><div><b>${fmt(value)}</b></div></div><div class="tooltip">${tip}</div></div>` }
+function ensureSelection(){ if(!WORLD.selected || !WORLD.cities[WORLD.selected]){ const ids = Object.keys(WORLD.cities); WORLD.selected = ids.length ? ids[0] : null; } }
+
+// ======= Town creation =======
+const SPECIES = ["Human","Elf","Dwarf","Orc","Halfling"];
+const TERRAIN_ALLOWED = ["Plains","Forest","Hills","Mountain","Coast","Swamp"];
+function slugify(name){ return name.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,''); }
+function addTownInteractive(){
+  const name = prompt("Town name? (e.g., Greenhollow)");
+  if(!name) return;
+  const species = prompt(`Majority species? One of: ${SPECIES.join(", ")}`, "Human");
+  if(!species || !SPECIES.includes(species)) { alert("Invalid species."); return; }
+  const terr = prompt(`Terrain (comma-separated). Allowed: ${TERRAIN_ALLOWED.join(", ")}`, "Plains");
+  if(!terr) return;
+  const terrain = terr.split(",").map(s=>s.trim()).filter(Boolean);
+  if(!terrain.every(t=>TERRAIN_ALLOWED.includes(t))) { alert("Invalid terrain."); return; }
+
+  const baseStores = {Food:240,Wood:120,Stone:80,Iron:30,Lux:20,Gold:100};
+  const buildings = {};
+  buildings.Farm = terrain.includes("Plains") ? 8 : 6;
+  if(terrain.includes("Coast")) buildings.Fishery = 3;
+  if(terrain.includes("Forest")) buildings.LumberCamp = 3;
+  if(terrain.includes("Hills")||terrain.includes("Mountain")) buildings.StoneQuarry = 2;
+  if(terrain.includes("Mountain")) buildings.IronMine = 1;
+  buildings.Market = 1;
+  buildings.Brewery = 1;
+
+  const id = slugify(name) || `town-${Date.now()}`;
+  WORLD.cities[id] = { id, name, species, terrain, population: 900, morale: START_MORALE, unrest: START_UNREST, hungerWeeks: 0, stores: baseStores, buildings, log: [] };
+  WORLD.selected = id;
+  render(); saveLocal();
 }
 
 // ======= Render =======
 function render(){
-  // sidebar
-  const s = Object.values(WORLD.cities).map(c=>{
+  ensureSelection();
+
+  const ids = Object.keys(WORLD.cities);
+  const s = ids.map(id=>{
+    const c = WORLD.cities[id];
     return `<div class="card city-card ${WORLD.selected===c.id?'active':''}" onclick="selectCity('${c.id}')">
       <div class="row" style="justify-content:space-between">
         <div>
@@ -207,7 +259,13 @@ function render(){
       </div>
     </div>`
   }).join('');
-  document.getElementById('sidebar').innerHTML = s;
+  document.getElementById('sidebar').innerHTML = s || `<div class="empty">No towns yet. Click <b>Add Town</b> to get started.</div>`;
+
+  if(!WORLD.selected){
+    document.getElementById('main').innerHTML = `<div class="empty">No town selected. Click <b>Add Town</b> to create your first one.</div>`;
+    document.getElementById('right').innerHTML = "";
+    return;
+  }
 
   const city = WORLD.cities[WORLD.selected];
   const net = computeNet(city);
@@ -248,7 +306,6 @@ function render(){
     </div>
   `;
 
-  // build catalog
   const buildHtml = Object.keys(BUILDINGS).map(k=>{
     const spec = BUILDINGS[k];
     const costText = Object.entries(spec.cost).map(([r,v])=>`${r} ${v}`).join(' · ');
@@ -265,7 +322,6 @@ function render(){
   }).join('');
   document.getElementById('buildGrid').innerHTML = buildHtml;
 
-  // right column: Advisor + Logs
   const adv = buildAdvice(city);
   document.getElementById('right').innerHTML = `
     <div class="card"><div class="head">Advisor</div>
@@ -295,12 +351,9 @@ function render(){
 }
 
 // ======= Actions =======
-function pushUndo(){
-  WORLD.undo.push(JSON.stringify(WORLD));
-  if(WORLD.undo.length>25) WORLD.undo.shift();
-}
-function undo(){ if(!WORLD.undo.length) return; WORLD = JSON.parse(WORLD.undo.pop()); render(); }
-function selectCity(id){ WORLD.selected=id; render(); }
+function pushUndo(){ WORLD.undo.push(JSON.stringify(WORLD)); if(WORLD.undo.length>25) WORLD.undo.shift(); }
+function undo(){ if(!WORLD.undo.length) return; WORLD = JSON.parse(WORLD.undo.pop()); render(); saveLocal(); }
+function selectCity(id){ WORLD.selected=id; render(); saveLocal(); }
 function doBuild(cityId, b){
   const c = WORLD.cities[cityId]; const spec=BUILDINGS[b];
   if(spec.req?.length && !spec.req.some(t=>c.terrain.includes(t))){ alert(`${b} requires ${spec.req.join(' or ')}`); return; }
@@ -309,10 +362,11 @@ function doBuild(cityId, b){
   pushUndo();
   for(const [r,v] of Object.entries(spec.cost)) c.stores[r]-=v;
   c.buildings[b]=(c.buildings[b]||0)+1;
-  render();
+  render(); saveLocal();
 }
-function advance(n=1){ pushUndo(); for(let i=0;i<n;i++) WORLD = tickOneWeek(WORLD); render(); }
-function reset(){ WORLD = initialWorld(); AUTO=false; clearInterval(AUTO_T); document.getElementById('autoBtn').textContent='Auto: Off'; render(); }
+function advance(n=1){ pushUndo(); for(let i=0;i<n;i++) WORLD = tickOneWeek(WORLD); render(); saveLocal(); }
+function reset(){ WORLD = initialWorld(); AUTO=false; clearInterval(AUTO_T); document.getElementById('autoBtn').textContent='Auto: Off'; render(); saveLocal(); }
+function addTown(){ addTownInteractive(); }
 
 // ======= Wire controls =======
 document.getElementById('adv1').onclick=()=>advance(1);
@@ -322,8 +376,13 @@ document.getElementById('reset').onclick=()=>reset();
 document.getElementById('autoBtn').onclick=()=>{
   AUTO=!AUTO;
   if(AUTO){ document.getElementById('autoBtn').textContent='Auto: On'; AUTO_T=setInterval(()=>advance(1),1200);} else { document.getElementById('autoBtn').textContent='Auto: Off'; clearInterval(AUTO_T);} }
+document.getElementById('addTown').onclick=()=>addTown();
+document.getElementById('export').onclick=()=>exportWorld();
+document.getElementById('importFile').onchange=(e)=>{ if(e.target.files?.[0]) importWorldFile(e.target.files[0]); };
 
 // Boot
+loadLocal();
+ensureSelection();
 render();
 </script>
 </body>
